@@ -31,14 +31,28 @@ use 5.006;
 use strict;
 use warnings;
 use Carp;
+use Data::Dumper;
 use overload 
   '""' => "stringify",
-  'eq' => "equate";
+  '==' => 'equate',
+  'eq' => "equate",
+  '!=' => "notequal",
+  'ne' => "notequal";
 
-# CVS ID: $Id: Interval.pm,v 1.6 2004/06/15 02:52:57 timj Exp $
+# CVS ID: $Id$
 
 use vars qw/ $VERSION /;
-$VERSION = '0.01';
+$VERSION = '0.05';
+
+# hash of allowed lower-cased constructor keys with
+# corresponding accessor method
+my %ConstructAllowed = (
+			min => 'min',
+			max => 'max',
+			incmax => 'inc_max',
+			incmin => 'inc_min',
+			posdef => 'pos_def',
+		       );
 
 =head1 METHODS
 
@@ -52,7 +66,31 @@ Create a new object. Can be populated when supplied with
 keys C<Max> and C<Min>.
 
   $r = new Number::Interval();
+
+This interval is Inf.
+
   $r = new Number::Interval( Max => 5 );
+
+This interval is > 5.
+
+  $r = new Number::Interval( Max => 5, Min => 22 );
+
+This interval is > 22 and < 5.
+
+By default the interval does not include the bounds themselves. They
+can be included by using the IncMax and IncMin keys.
+
+  $r = new Number::Interval( Max => 5, IncMax => 1 );
+
+The above interval is >=5
+
+Positive-definite intervals allow the stringification to ignore
+the lower bound if it is 0 (even if set explicitly).
+
+  $r = new Number::Interval( Max => 5, IncMax => 1, Min => 0, 
+                             PosDef => 1);
+
+The keys are case-insensitive.
 
 =cut
 
@@ -65,16 +103,41 @@ sub new {
   my $r = {
 	   Min => undef,
 	   Max => undef,
+	   IncMax => 0,
+	   IncMin => 0,
+	   PosDef => 0,
 	  };
 
   # Create object
   my $obj = bless $r, $class;
 
   # Populate it
-  $obj->min( $args{Min}) if exists $args{Min};
-  $obj->max( $args{Max}) if exists $args{Max};
+  for my $key (keys %args) {
+    my $lc = lc( $key );
+    if (exists $ConstructAllowed{$lc}) {
+      my $method = $ConstructAllowed{$lc};
+      $obj->$method( $args{$key} );
+    }
+  }
 
   return $obj;
+}
+
+=item B<copy>
+
+Copy the contents of the current object into a new object and return it.
+
+ $new = $r->copy;
+
+=cut
+
+sub copy {
+  my $self = shift;
+  my $new = $self->new();
+  # simplistic hash copy since we know that we are a simple hash internally
+  # subclasses might get in trouble if they have complexity.
+  %$new = %$self;
+  return $new;
 }
 
 =back
@@ -96,10 +159,7 @@ C<undef> indicates that the interval has no upper bound.
 
 sub max {
   my $self = shift;
-  if (@_) {
-    my $max = shift;
-    $self->{Max} = $max;
-  }
+  $self->{Max} = shift if @_;
   return $self->{Max};
 }
 
@@ -118,6 +178,70 @@ sub min {
   my $self = shift;
   $self->{Min} = shift if @_;
   return $self->{Min};
+}
+
+=item B<inc_max>
+
+Return (or set) the boolean indicating whether the maximum bound
+of the interval should be included in the bound definition. If true,
+the bounds will be >= max.
+
+  $inc = $r->inc_max;
+  $r->inc_max( 1 );
+
+Default is false (not included).
+
+=cut
+
+sub inc_max {
+  my $self = shift;
+  $self->{IncMax} = shift if @_;
+  return $self->{IncMax};
+}
+
+
+=item B<inc_min>
+
+Return (or set) the boolean indicating whether the minimum bound
+of the interval should be included in the bound definition. If true,
+the bounds will be <= min.
+
+  $inc = $r->inc_min;
+  $r->inc_min( 1 );
+
+Default is false (not included).
+
+=cut
+
+sub inc_min {
+  my $self = shift;
+  $self->{IncMin} = shift if @_;
+  return $self->{IncMin};
+}
+
+=item B<pos_def>
+
+Indicate that the interval is positive definite. This helps the
+stringification method to determine whether the lower bound
+should be included
+
+  $r->pos_def( 1 );
+
+
+If set to true, automatically sets the lower bound to 0 if the lower bound
+is not explicitly defined.
+
+=cut
+
+sub pos_def {
+  my $self = shift;
+  if (@_) {
+    $self->{PosDef} = shift;
+    if ($self->{PosDef} && !defined $self->min) {
+      $self->min( 0 );
+    }
+  }
+  return $self->{PosDef};
 }
 
 =item B<minmax>
@@ -174,6 +298,27 @@ sub minmax_hash {
   return (wantarray ? %minmax : \%minmax);
 }
 
+=item B<sizeof>
+
+Returns the size of the interval.
+
+  $sizeof = $r->sizeof;
+
+If either of the lower or upper ends are unbounded, then C<undef> will
+be returned.
+
+=cut
+
+sub sizeof {
+  my $self = shift;
+  if( ! defined( $self->min ) ||
+      ! defined( $self->max ) ) {
+    return undef;
+  }
+
+  return abs( $self->max - $self->min );
+}
+
 =back
 
 =head2 General
@@ -193,20 +338,35 @@ sub stringify {
   my $min = $self->min;
   my $max = $self->max;
 
-  if (defined $min and defined $max) {
+  # are we inclusive (for unbound ranges)
+  my $inc_min_ub = ( $self->inc_min ? "=" : " " );
+  my $inc_max_ub = ( $self->inc_max ? "=" : " " );
+
+  if (defined $min && defined $max) {
     # Bound
-    no warnings 'numeric'; #KLUGE
-    if ($max < $min) {
-      return "<=$max and >=$min";
+
+    # use standard interval notation when using a bound range
+    my $inc_min_b = ( $self->inc_min ? "[" : "(" );
+    my $inc_max_b = ( $self->inc_max ? "]" : ")" );
+
+    if ($min == $max) {
+      # no range
+      return "==$min";
+    } elsif ($max < $min) {
+      return "<$inc_max_ub$max and >$inc_min_ub$min";
     } else {
-      return "$min-$max";
+      if ($min <= 0 && $self->pos_def) {
+	return "<$inc_max_ub$max";
+      } else {
+	return "$inc_min_b$min,$max$inc_max_b";
+      }
     }
   } elsif (defined $min) {
-    return ">=$min";
+    return ">$inc_min_ub$min";
   } elsif (defined $max) {
-    return "<=$max";
+    return "<$inc_max_ub$max";
   } else {
-    return "**ERROR**";
+    return "Inf";
   }
 
 }
@@ -263,10 +423,39 @@ sub equate {
   # Need to check that both are objects
   return 0 unless defined $comparison;
   return 0 unless UNIVERSAL::isa($comparison, "Number::Interval");
-  no warnings 'numeric'; # KLUGE
-  return 0 if $self->min != $comparison->min;
-  return 0 if $self->max != $comparison->max;
 
+  # need to be explicit about undefs
+  # return false immediately we find a difference
+  for my $m (qw/ min max/) {
+    # first values
+    if ( defined $comparison->$m() ) {
+      return 0 if !defined $self->$m();
+      return 0 if $comparison->$m() != $self->$m();
+    } else {
+      return 0 if defined $self->$m();
+    }
+
+    # then boolean
+    my $incm = 'inc_' . $m;
+
+    # return false if state of one is NOT the other
+    return 0 if ( ( $self->$incm() && !$comparison->$incm() ) ||
+		  ( !$self->$incm() && $comparison->$incm() ) );
+  }
+  return 1;
+}
+
+=item B<notequal>
+
+Inverse of C<equate>. Used by the tied interface to implement !=.
+
+  $i1 != $i2
+
+=cut
+
+sub notequal {
+  my $self = shift;
+  return !$self->equate( @_ );
 }
 
 =item B<contains>
@@ -274,6 +463,14 @@ sub equate {
 Determine whether a supplied value is within the defined intervals.
 
   $is = $i->contains( $value );
+
+If both intervals are undefined, always returns true.
+
+If the min == max, returns true if the supplied value is that
+value, regardless of IncMin and IncMax setttings.
+
+If the interval is positive definite, always returns false if the
+supplied value is negative.
 
 =cut
 
@@ -283,15 +480,31 @@ sub contains {
 
   my $max = $self->max;
   my $min = $self->min;
+  return 1 if (!defined $max && !defined $min);
 
   # Assume it doesnt match the interval
   my $contains = 0;
   if ($self->isinverted) {
     # Inverted interval. Both max and min must be defined
     if (defined $max and defined $min) {
-      if ($value < $max || $value > $min) {
-	$contains = 1;
+      if ($self->inc_max && $self->inc_min) {
+	if ($value <= $max || $value >= $min) {
+	  $contains = 1;
+	}
+      } elsif ($self->inc_max) {
+	if ($value <= $max || $value > $min) {
+	  $contains = 1;
+	}
+      } elsif ($self->inc_min) {
+	if ($value < $max || $value >= $min) {
+	  $contains = 1;
+	}
+      } else {
+	if ($value < $max || $value > $min) {
+	  $contains = 1;
+	}
       }
+
     } else {
       croak "An interval can not be inverted with only one defined value";
     }
@@ -299,15 +512,40 @@ sub contains {
   } else {
     # normal interval
     if (defined $max and defined $min) {
-      if ($value < $max && $value > $min) {
-	$contains = 1;
+      if ($max == $min) {
+	$contains = 1 if $value == $max;
+      } elsif ($self->pos_def && $value < 0) {
+	$contains = 0;
+      } elsif ($self->inc_max && $self->inc_min) {
+	if ($value <= $max && $value >= $min) {
+	  $contains = 1;
+	}
+      } elsif ($self->inc_max) {
+	if ($value <= $max && $value > $min) {
+	  $contains = 1;
+	}
+      } elsif ($self->inc_min) {
+	if ($value < $max && $value >= $min) {
+	  $contains = 1;
+	}
+      } else {
+	if ($value < $max && $value > $min) {
+	  $contains = 1;
+	}
       }
     } elsif (defined $max) {
-      $contains = 1 if $value < $max;
+      if ($self->inc_max) {
+	$contains = 1 if $value <= $max;
+      } else {
+	$contains = 1 if $value <= $max;
+      }
     } elsif (defined $min) {
-      $contains = 1 if $value > $min;
+      if ($self->inc_min) {
+	$contains = 1 if $value >= $min;
+      } else {
+	$contains = 1 if $value > $min;
+      }
     }
-
   }
 
   return $contains;
@@ -427,7 +665,8 @@ sub intersection {
 
 
 	  } else {
-	    croak "Oops Bug in interval intersection [6]"
+	    croak "Oops Bug in interval intersection [6]\n".
+	      _formaterr( $min1, $max1, $min2, $max2);
 	  }
 
 
@@ -467,7 +706,9 @@ sub intersection {
 	    }
 
 	  } else {
-	    croak "This cant happen in Number::Interval[4]";
+              # both undefined
+              $outmax = $max1;
+              $outmin = $min1;
 	  }
 
 	}
@@ -503,37 +744,41 @@ sub intersection {
 	# unbound is now guaranteed to be (2)
 	# Check that unbound max is in interval
 	if (defined $max2) {
-	  if ($max2 < $max1 && $max2 > $min1) {
+	  if ($max2 <= $max1 && $max2 >= $min1) {
 	    # inside interval
 	    $outmax = $max2;
 	    $outmin = $min1;
-	  } elsif ($max2 < $min1) {
+	  } elsif ($max2 <= $min1) {
 	    # outside interval. No intersection
-	  } elsif ($max2 > $max1) {
+	  } elsif ($max2 >= $max1) {
 	    # below interval. irrelevant
 	    $outmax = $max1;
 	    $outmin = $min1;
 	  } else {
-	    croak "Number::Interval - This should not happen[2]";
+	    croak "Number::Interval - This should not happen[2]\n".
+	      _formaterr( $min1, $max1, $min2, $max2);
 	  }
 
 	} elsif (defined $min2) {
-	  if ($min2 < $max1 && $min2 > $min1) {
+	  if ($min2 <= $max1 && $min2 >= $min1) {
 	    # inside interval
 	    $outmax = $max1;
 	    $outmin = $min2;
-	  } elsif ($min2 > $max1) {
+	  } elsif ($min2 >= $max1) {
 	    # outside interval. No intersection
-	  } elsif ($min2 < $min1) {
+	  } elsif ($min2 <= $min1) {
 	    # below interval. irrelevant
 	    $outmax = $max1;
 	    $outmin = $min1;
 	  } else {
-	    croak "Number::Interval - This should not happen[3]";
+	    croak "Number::Interval - This should not happen[3]:\n" .
+	      _formaterr( $min1, $max1, $min2, $max2);
 	  }
 
 	} else {
-	  croak "interval intersection: This cant happen (no limit defined)[1]";
+          # The second interval is unbounded at both ends
+          $outmax = $max1;
+          $outmin = $min1;
 	}
 
 
@@ -544,18 +789,30 @@ sub intersection {
 
   } else {
     # Unbound+Unbound only
-    # Three options here. 
+    # Four options here. 
     # 1. A max and a max =>  max (same for min and min)
     # 2. max and a min with no overlap => no intersection
     # 3. max and min with overlap => bounded interval
-    if (defined $max1 and defined $max2) {
-      $outmax = ( $max1 > $max2 ? $max1 : $max2 );
+    # 4. all undefined
+    if (defined $max1 && defined $max2) {
+      $outmax = ( $max1 < $max2 ? $max1 : $max2 );
+    } elsif (defined $min2 && defined $min1) {
+      $outmin = ( $min1 > $min2 ? $min1 : $min2 );
     } else {
       # max and a min - one must be defined for both
       my $refmax = (defined $max1 ? $max1 : $max2);
       my $refmin = (defined $min1 ? $min1 : $min2);
 
-      if ($refmax > $refmin) {
+      if (!defined $refmax && !defined $refmin) {
+	# infinite bound
+	return 1;
+      } elsif (!defined $refmax) {
+	# just a min
+	$outmin = $refmin;
+      } elsif (!defined $refmin) {
+	# just a max
+	$outmax = $refmax;
+      } elsif ($refmax > $refmin) {
 	# normal bound interval
 	$outmax = $refmax;
 	$outmin = $refmin;
@@ -580,11 +837,28 @@ sub intersection {
 
 }
 
+sub _formaterr {
+  my ($min1, $max1, $min2, $max2) = @_;
+  return "Comparing : (".
+    (defined $min1 ? $min1 : "<undef>" ).
+      "," . 
+	(defined $max1 ? $max1 : "<undef>" ).
+	  ") with (".
+	    (defined $min2 ? $min2 : "<undef>" ).
+	      "," . (defined $max2 ? $max2 : "<undef>" ).
+		")";
+}
+
 =back
+
+=head1 NOTES
+
+The default interval is not inclusive of the bounds.
 
 =head1 COPYRIGHT
 
-Copyright (C) 2002-2004 Particle Physics and Astronomy Research Council.
+Copyright (C) 2009 Science and Technology Facilities Council.
+Copyright (C) 2002-2005 Particle Physics and Astronomy Research Council.
 All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
