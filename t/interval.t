@@ -3,7 +3,7 @@
 use 5.006;
 use strict;
 use warnings;
-use Test::More tests => 164;
+use Test::More tests => 183;
 
 require_ok( 'Number::Interval' );
 
@@ -341,6 +341,43 @@ ok($r1->intersection($r2));
 is($r1->max, 1);
 is($r1->min, 5);
 
+# Check bounds that touch
+$r1 = Number::Interval->new(Min => 1, Max => 2, IncMax => 0);
+$r2 = Number::Interval->new(Min => 2, IncMin => 0, Max => 3);
+ok( !$r1->intersection($r2) );
+
+$r1 = Number::Interval->new(Min => 1, Max => 2, IncMax => 0);
+$r2 = Number::Interval->new(Min => 2, IncMin => 1, Max => 3);
+ok( !$r1->intersection($r2) );
+
+$r1 = Number::Interval->new(Min => 1, Max => 2, IncMax => 1);
+$r2 = Number::Interval->new(Min => 2, IncMin => 1, Max => 3);
+ok( $r1->intersection($r2) );
+
+# Check inc_max/min flags
+$r1 = Number::Interval->new(Min => 1, Max => 3, IncMax => 1);
+$r2 = Number::Interval->new(Min => 2, IncMin => 1, Max => 4);
+ok( $r1->intersection($r2) );
+is($r1->min, 2 );
+is($r1->max, 3 );
+ok($r1->inc_min );
+ok($r1->inc_max );
+
+$r1 = Number::Interval->new(Min => 1, Max => 3, IncMin=> 1, IncMax => 1);
+$r2 = Number::Interval->new(Min => 2, IncMin => 0, Max => 4);
+ok( $r1->intersection($r2) );
+is($r1->min, 2 );
+is($r1->max, 3 );
+ok(!$r1->inc_min );
+ok($r1->inc_max );
+
+$r1 = Number::Interval->new(Min => 1, Max => 3, IncMin=> 1, IncMax => 1);
+$r2 = Number::Interval->new(Min => 2, IncMin => 0, IncMax=> 0, Max => 3);
+ok( $r1->intersection($r2) );
+is($r1->min, 2 );
+is($r1->max, 3 );
+ok(!$r1->inc_min );
+ok(!$r1->inc_max );
 
 # Inclusive interval
 my $int2 = new Number::Interval( Min => 5, Max => 10, IncMin => 1);
@@ -383,8 +420,10 @@ ok($r1 != $r2,"not equal to >= 4 (with incmax set)");
 $r1 = new Number::Interval( Min => 4, Max => 4 );
 is( "$r1", "==4", "min == max");
 
-ok( $r1->contains( 4 ), "Does 4==4 contain 4");
-ok( !$r1->contains( 5 ), "Does 4==4 contain 5");
+ok( ! $r1->contains( 4 ), "(4,4) does not contain 4");
+$r1->inc_min(1);
+ok( $r1->contains(4), "[4,4) does contain 4");
+ok( !$r1->contains( 5 ), "[4,4) does not contain 5");
 
 # positive definite
 $r1 = new Number::Interval( Max => 4, posdef => 1);
